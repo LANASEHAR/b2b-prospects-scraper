@@ -26,4 +26,4 @@ jobs:
         env:
           GOOGLE_SHEET_WEBHOOK_URL: ${{ secrets.GOOGLE_SHEET_WEBHOOK_URL }}
         run: |
-          python scraper_prospects_france.py
+          python scraper_prospects_france.pyl
