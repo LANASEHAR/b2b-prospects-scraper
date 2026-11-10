@@ -1,4 +1,12 @@
 name: B2B Prospects Scraper (Salons & Laveries)
+pip install requests beautifulsoup4 lxml
+# Mac/Linux:
+export GOOGLE_SHEET_WEBHOOK_URL="https://script.google.com/macros/s/YOUR_DEPLOYMENT_ID/exec"
+python scraper_prospects_france.py
+
+# Windows (Command Prompt):
+set GOOGLE_SHEET_WEBHOOK_URL=https://script.google.com/macros/s/YOUR_DEPLOYMENT_ID/exec
+python scraper_prospects_france.py
 
 on:
   schedule:
