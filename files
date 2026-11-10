@@ -1,0 +1,6 @@
+git init
+git add .
+git commit -m "feat: initial commit b2b commercial scraper"
+git branch -M main
+git remote add origin https://github.com/LANASEHAR/b2b-prospects-scraper.git
+git push -u origin main
