@@ -1,13 +1,9 @@
-name: B2B Prospects Scraper
+name: B2B Prospects Scraper (Journalier 1h30)
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
   schedule:
-    # Exécution automatique le lundi et le jeudi à 06h00 UTC
-    - cron: '0 6 * * 1,4'
+    - cron: '0 5 * * *'
 
 concurrency:
   group: b2b-scraper
@@ -16,7 +12,7 @@ concurrency:
 jobs:
   scrape-and-sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
 
     steps:
       - name: Checkout repository
@@ -32,7 +28,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 lxml
 
-      - name: Run Scraper (PagesJaunes, Overpass OSM & SIRENE)
+      - name: Run Scraper (1h35 France Entiere)
         env:
           GOOGLE_SHEET_WEBHOOK_URL: ${{ secrets.GOOGLE_SHEET_WEBHOOK_URL }}
         run: |
@@ -43,8 +39,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: b2b-prospects-${{ github.run_id }}
-          path: |
-            laveries_france.csv
-            salons_coiffure_france.csv
+          path: prospects_france_complet.csv
           if-no-files-found: ignore
           retention-days: 30
