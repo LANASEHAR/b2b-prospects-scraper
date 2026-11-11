@@ -2,12 +2,11 @@ name: B2B Prospects Scraper (Journalier 1h30)
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
   schedule:
     - cron: '0 5 * * *'
-
-concurrency:
-  group: b2b-scraper
-  cancel-in-progress: false
 
 jobs:
   scrape-and-sync:
@@ -17,6 +16,11 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Verifier la presence des fichiers
+        run: |
+          echo "=== Liste des fichiers a la racine du repo ==="
+          ls -la
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -28,17 +32,24 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 lxml
 
-      - name: Run Scraper (1h35 France Entiere)
+      - name: Run Scraper
         env:
           GOOGLE_SHEET_WEBHOOK_URL: ${{ secrets.GOOGLE_SHEET_WEBHOOK_URL }}
         run: |
-          python scraper_prospects_france.py
+          if [ -f "scraper_prospects_france.py" ]; then
+            python scraper_prospects_france.py
+          elif [ -f "scraper.py" ]; then
+            python scraper.py
+          else
+            echo "ERREUR : Aucun fichier Python de scraping trouve a la racine !"
+            exit 1
+          fi
 
       - name: Save CSV exports as artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: b2b-prospects-${{ github.run_id }}
-          path: prospects_france_complet.csv
+          path: "*.csv"
           if-no-files-found: ignore
           retention-days: 30
