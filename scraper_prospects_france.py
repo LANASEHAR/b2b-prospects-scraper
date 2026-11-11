@@ -2,20 +2,19 @@
 # -*- coding: utf-8 -*-
 """
 =============================================================================
-SCRAPER B2B TOUT-TERRAIN & ANTI-BLOCAGES — SALONS & LAVERIES FRANCE
+SCRAPER B2B TOTAL & MULTI-SOURCES — SALONS (MAPS/PLANITY) & LAVERIES FRANCE
 =============================================================================
-8 ANTICIPATIONS CRITIQUES INTÉGRÉES :
-1. DÉTOURNEMENT DES LIENS REDIRIGÉS : Décodage des liens de tracking Bing/DDG
-   (ex. /ck/a? ou uddg=) pour ne plus jamais manquer le vrai site officiel.
-2. TOLÉRANCE SSL POUR SITES ARTISANS : Désactivation stricte des erreurs de
-   certificats SSL expirés (très fréquent sur les sites de petits salons).
-3. MULTI-MIRROIRS OVERPASS OSM : Bascule automatique si un serveur est saturé.
-4. PARSING TÉLÉPHONE UNIVERSEL : Capture des tags a[href^='tel:'], des formats
-   avec indicatifs +33 (0)6, points, tirets ou collés.
-5. DÉCODAGE HTML ENTITIES POUR EMAILS : Traduction des &#64; anti-spam.
-6. ROTATION MULTI-MOTEURS (Bing + DuckDuckGo) : Zéro panne si un moteur bloque.
-7. POOL RÉSEAU 50 SOCKETS : Zéro warning de pool saturé.
-8. ENVOI EN DIRECT GOOGLE SHEETS : Dès 2 prospects qualifiés, sans attendre la fin.
+Sources croisées complètes :
+1. Salons de coiffure :
+   - Fiches Google Maps & PagesJaunes locales
+   - Base cartographique OpenStreetMap (shop=hairdresser)
+   - Plateforme Planity France (planity.com)
+   - Répertoire officiel INSEE / SIRENE (NAF 96.02A, hors franchises)
+2. Laveries automatiques :
+   - OpenStreetMap Overpass (shop=laundry)
+   - Réseaux Speed Queen, Wash'n Dry & Electrolux
+   - Fiches Google Maps d'urgence
+3. Anti-doublons strict & Envoi en direct Google Sheets dès 2 prospects
 =============================================================================
 """
 
@@ -33,18 +32,15 @@ from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 import urllib3
 
-# Désactivation des warnings SSL pour les sites artisans avec certificats expirés
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 TIMEOUT_SITE = 6
 TIMEOUT_API = 12
-MAX_RUN_SECONDS = 95 * 60  # 1h35 de run journalier
+MAX_RUN_SECONDS = 95 * 60  # 1h35
 CSV_FILE = "prospects_france_complet.csv"
 
-# Regex améliorées
 EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 PHONE_FR_RE = re.compile(r"(?:(?:\+|00)33\s*(?:\(0\))?|0)\s*[1-9](?:[\s.-]*\d{2}){4}")
 INSTA_RE = re.compile(r"https?://(?:www\.)?instagram\.com/([A-Za-z0-9_.]+)/?", re.I)
@@ -59,7 +55,7 @@ EXCLUDED_FRANCHISES = [
 IGNORED_EMAILS = {
     "example@example.com", "contact@wix.com", "support@planity.com",
     "info@domain.com", "contact@domain.fr", "sentry@io", "noreply@google.com",
-    "webmaster@free.fr", "abuse@orange.fr", "privacy@solocal.com", "dpo@solocal.com"
+    "webmaster@free.fr", "abuse@orange.fr", "privacy@solocal.com"
 }
 
 OVERPASS_SERVERS = [
@@ -97,7 +93,6 @@ def clean_str(val: str) -> str:
 
 def format_phone_fr(raw: str) -> str:
     p = re.sub(r"[^\d+]", "", raw or "")
-    # Gestion du format +33 (0)6...
     if p.startswith("+330"): p = "0" + p[4:]
     elif p.startswith("+33"): p = "0" + p[3:]
     elif p.startswith("0033"): p = "0" + p[4:]
@@ -117,28 +112,22 @@ def decode_cloudflare_email(cf_hash: str) -> str:
         return ""
 
 def unwrap_tracking_url(url: str) -> str:
-    """Déballe les URLs de redirection de Bing, DuckDuckGo ou Google."""
     if not url: return ""
     try:
         parsed = urlparse(url)
-        # DuckDuckGo tracking
         if "duckduckgo.com" in parsed.netloc and "uddg=" in parsed.query:
             qs = parse_qs(parsed.query)
             if "uddg" in qs: return qs["uddg"][0]
-        # Google tracking
         if "google." in parsed.netloc and "/url" in parsed.path:
             qs = parse_qs(parsed.query)
             if "q" in qs: return qs["q"][0]
             if "url" in qs: return qs["url"][0]
-        # Bing tracking
-        if "bing.com" in parsed.netloc and "/ck/a" in parsed.path:
-            return "" # Bing chiffre ses URLs de redirection
     except Exception:
         pass
     return url
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MOTEUR ANTI-DOUBLONS RAPIDE
+# MOTEUR ANTI-DOUBLONS
 # ─────────────────────────────────────────────────────────────────────────────
 
 class Deduplicator:
@@ -187,120 +176,86 @@ class Deduplicator:
         if key != "@": self.seen_names_cities.add(key)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MODULE DE RECHERCHE CIBLÉE ROTATIF (BING + DDG)
+# MODULE GOOGLE MAPS & LOCAL PACK (SALONS DE COIFFURE & LAVERIES)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def search_targeted_multi_engine(session: requests.Session, query: str) -> dict:
-    res = {"phones": set(), "emails": set(), "instagram": "", "facebook": "", "site_web": "", "planity": ""}
-
-    # 1. Tentative Bing
-    try:
-        url_bing = f"https://www.bing.com/search?q={quote_plus(query)}&setlang=fr-FR"
-        r = session.get(url_bing, timeout=TIMEOUT_API)
-        if r.status_code == 200:
-            soup = BeautifulSoup(r.text, "html.parser")
-            text_full = soup.get_text(" ", strip=True)
-
-            for tel in PHONE_FR_RE.findall(text_full):
-                res["phones"].add(format_phone_fr(tel))
-
-            for a in soup.select("li.b_algo h2 a[href]"):
-                h = unwrap_tracking_url(a.get("href", ""))
-                if not h: continue
-                d = urlparse(h).netloc.lower()
-
-                if "instagram.com" in d and not res["instagram"]:
-                    m_i = INSTA_RE.search(h)
-                    if m_i and m_i.group(1).lower() not in ["p", "reel", "explore"]:
-                        res["instagram"] = f"https://www.instagram.com/{m_i.group(1)}/"
-                elif "facebook.com" in d and not res["facebook"]:
-                    m_f = FB_RE.search(h)
-                    if m_f and m_f.group(1).lower() not in ["sharer", "tr"]:
-                        res["facebook"] = f"https://www.facebook.com/{m_f.group(1)}"
-                elif "planity.com" in d and not res["planity"]:
-                    res["planity"] = h
-                elif d and not res["site_web"] and not any(bad in d for bad in ["bing", "microsoft", "pagesjaunes", "societe", "infogreffe"]):
-                    res["site_web"] = f"{urlparse(h).scheme}://{d}"
-    except Exception:
-        pass
-
-    # 2. Si aucun site trouvé, fallback DuckDuckGo
-    if not res["site_web"]:
+def search_google_maps_salons(session: requests.Session, ville: str) -> list:
+    """Recherche les fiches Google Maps locales pour les salons de coiffure."""
+    results = []
+    queries = [
+        f'site:google.com/maps/place "coiffeur" "{ville}"',
+        f'"coiffeur" "{ville}" "téléphone" "avis" Google Maps'
+    ]
+    for q in queries:
+        url = f"https://www.bing.com/search?q={quote_plus(q)}&setlang=fr-FR"
         try:
-            url_ddg = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
-            r_ddg = session.get(url_ddg, timeout=TIMEOUT_API)
-            if r_ddg.status_code == 200:
-                soup_ddg = BeautifulSoup(r_ddg.text, "html.parser")
-                for a in soup_ddg.select(".result__a"):
-                    h = unwrap_tracking_url(a.get("href", ""))
-                    d = urlparse(h).netloc.lower()
-                    if d and not any(bad in d for bad in ["duckduckgo", "pagesjaunes", "societe", "infogreffe"]):
-                        res["site_web"] = f"{urlparse(h).scheme}://{d}"
-                        break
-        except Exception:
-            pass
+            r = session.get(url, timeout=TIMEOUT_API)
+            if r.status_code == 200:
+                soup = BeautifulSoup(r.text, "html.parser")
+                for li in soup.select("li.b_algo"):
+                    txt = li.get_text(" ", strip=True)
+                    a = li.select_one("h2 a[href]")
+                    if not a: continue
+                    nom = clean_str(a.get_text())
+                    nom = re.sub(r"\s*-\s*Google Maps.*$", "", nom, flags=re.I)
+                    if any(f in nom.upper() for f in EXCLUDED_FRANCHISES): continue
 
-    return res
+                    tels = [format_phone_fr(t) for t in PHONE_FR_RE.findall(txt)]
+                    mobs = [t for t in tels if is_mobile(t)]
+                    fixes = [t for t in tels if not is_mobile(t)]
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CRAWL PROFOND & TOLÉRANT DES SITES OFFICIELS
-# ─────────────────────────────────────────────────────────────────────────────
-
-def crawl_site_deep(session: requests.Session, url: str) -> dict:
-    res = {"emails": set(), "mobiles": set(), "fixes": set(), "instagram": ""}
-    if not url or not url.startswith("http"): return res
-
-    for target in [url, f"{url.rstrip('/')}/contact", f"{url.rstrip('/')}/mentions-legales"]:
-        try:
-            # verify=False pour ne pas échouer sur les certificats SSL expirés des petits commerces
-            r = session.get(target, timeout=TIMEOUT_SITE, verify=False)
-            if r.status_code != 200: continue
-            
-            # Décodage des entités HTML anti-spam (ex: &#64; -> @)
-            raw_text = html.unescape(r.text)
-            soup = BeautifulSoup(raw_text, "html.parser")
-
-            # 1. Capture explicite des liens tel:
-            for a_tel in soup.select("a[href^='tel:']"):
-                clean_tel = format_phone_fr(a_tel.get("href", "").replace("tel:", ""))
-                if clean_tel:
-                    if is_mobile(clean_tel): res["mobiles"].add(clean_tel)
-                    else: res["fixes"].add(clean_tel)
-
-            # 2. Capture explicite des liens mailto:
-            for a_mail in soup.select("a[href^='mailto:']"):
-                mail_clean = a_mail.get("href", "").replace("mailto:", "").split("?")[0].lower().strip()
-                if EMAIL_RE.fullmatch(mail_clean) and mail_clean not in IGNORED_EMAILS:
-                    res["emails"].add(mail_clean)
-
-            # 3. Cloudflare obfuscated emails
-            for cf in soup.select("[data-cfemail]"):
-                dec = decode_cloudflare_email(cf.get("data-cfemail", ""))
-                if dec and dec not in IGNORED_EMAILS: res["emails"].add(dec)
-
-            # 4. Regex dans le texte
-            for mail in EMAIL_RE.findall(raw_text):
-                m_c = mail.lower().strip(".,;:()")
-                if m_c not in IGNORED_EMAILS and not m_c.endswith((".png", ".jpg", ".webp", ".svg", ".js")):
-                    res["emails"].add(m_c)
-
-            for tel in PHONE_FR_RE.findall(raw_text):
-                fmt = format_phone_fr(tel)
-                if is_mobile(fmt): res["mobiles"].add(fmt)
-                else: res["fixes"].add(fmt)
-
-            # 5. Instagram
-            for a in soup.select("a[href*='instagram.com']"):
-                m_i = INSTA_RE.search(a.get("href", ""))
-                if m_i and m_i.group(1).lower() not in ["p", "reel", "explore"]:
-                    res["instagram"] = f"https://www.instagram.com/{m_i.group(1)}/"
-                    break
+                    if tels and nom:
+                        results.append({
+                            "nom": nom,
+                            "mob": " / ".join(set(mobs)),
+                            "fix": " / ".join(set(fixes)),
+                            "ville": ville,
+                            "maps_url": unwrap_tracking_url(a.get("href", ""))
+                        })
         except Exception:
             continue
-    return res
+    return results
+
+def query_osm_salons(city: str) -> list:
+    """Overpass API : extraction cartographique des salons de coiffure déclarés."""
+    query = f"""
+    [out:json][timeout:15];
+    area["name"="{city}"]->.searchArea;
+    (
+      node["shop"="hairdresser"](area.searchArea);
+      way["shop"="hairdresser"](area.searchArea);
+    );
+    out center tags 35;
+    """
+    for server in OVERPASS_SERVERS:
+        try:
+            r = requests.post(server, data={"data": query}, timeout=20)
+            if r.status_code == 200:
+                salons = []
+                for el in r.json().get("elements", []):
+                    tags = el.get("tags", {})
+                    nom = tags.get("name") or tags.get("brand") or ""
+                    if not nom or any(f in nom.upper() for f in EXCLUDED_FRANCHISES): continue
+                    phone = format_phone_fr(tags.get("phone") or tags.get("contact:phone") or "")
+                    website = tags.get("website") or tags.get("contact:website") or ""
+                    street = tags.get("addr:street", "")
+                    num = tags.get("addr:housenumber", "")
+                    cp = tags.get("addr:postcode", "")
+                    salons.append({
+                        "nom": nom,
+                        "phone": phone,
+                        "website": website,
+                        "adresse": f"{num} {street}".strip(),
+                        "cp": cp,
+                        "ville": city
+                    })
+                if salons: return salons
+        except Exception:
+            continue
+    return []
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MODULE OVERPASS OSM AVEC MULTI-SERVEURS (SPÉCIAL LAVERIES)
+# MODULE OVERPASS LAVERIES
 # ─────────────────────────────────────────────────────────────────────────────
 
 def query_osm_laveries_multi_server(city: str) -> list:
@@ -334,11 +289,91 @@ def query_osm_laveries_multi_server(city: str) -> list:
                         "cp": cp,
                         "ville": city
                     })
-                if laveries:
-                    return laveries
+                if laveries: return laveries
         except Exception:
             continue
     return []
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CRAWL PROFOND & RECHERCHE CIBLÉE
+# ─────────────────────────────────────────────────────────────────────────────
+
+def crawl_site_deep(session: requests.Session, url: str) -> dict:
+    res = {"emails": set(), "mobiles": set(), "fixes": set(), "instagram": ""}
+    if not url or not url.startswith("http"): return res
+
+    for target in [url, f"{url.rstrip('/')}/contact", f"{url.rstrip('/')}/mentions-legales"]:
+        try:
+            r = session.get(target, timeout=TIMEOUT_SITE, verify=False)
+            if r.status_code != 200: continue
+            raw_text = html.unescape(r.text)
+            soup = BeautifulSoup(raw_text, "html.parser")
+
+            for a_tel in soup.select("a[href^='tel:']"):
+                clean_tel = format_phone_fr(a_tel.get("href", "").replace("tel:", ""))
+                if clean_tel:
+                    if is_mobile(clean_tel): res["mobiles"].add(clean_tel)
+                    else: res["fixes"].add(clean_tel)
+
+            for a_mail in soup.select("a[href^='mailto:']"):
+                m_c = a_mail.get("href", "").replace("mailto:", "").split("?")[0].lower().strip()
+                if EMAIL_RE.fullmatch(m_c) and m_c not in IGNORED_EMAILS: res["emails"].add(m_c)
+
+            for cf in soup.select("[data-cfemail]"):
+                dec = decode_cloudflare_email(cf.get("data-cfemail", ""))
+                if dec and dec not in IGNORED_EMAILS: res["emails"].add(dec)
+
+            for mail in EMAIL_RE.findall(raw_text):
+                m_c = mail.lower().strip(".,;:()")
+                if m_c not in IGNORED_EMAILS and not m_c.endswith((".png", ".jpg", ".webp", ".svg", ".js")):
+                    res["emails"].add(m_c)
+
+            for tel in PHONE_FR_RE.findall(raw_text):
+                fmt = format_phone_fr(tel)
+                if is_mobile(fmt): res["mobiles"].add(fmt)
+                else: res["fixes"].add(fmt)
+
+            for a in soup.select("a[href*='instagram.com']"):
+                m_i = INSTA_RE.search(a.get("href", ""))
+                if m_i and m_i.group(1).lower() not in ["p", "reel", "explore"]:
+                    res["instagram"] = f"https://www.instagram.com/{m_i.group(1)}/"
+                    break
+        except Exception:
+            continue
+    return res
+
+def search_targeted(session: requests.Session, query: str) -> dict:
+    res = {"phones": set(), "emails": set(), "instagram": "", "facebook": "", "site_web": "", "planity": ""}
+    url = f"https://www.bing.com/search?q={quote_plus(query)}&setlang=fr-FR"
+    try:
+        r = session.get(url, timeout=TIMEOUT_API)
+        if r.status_code == 200:
+            soup = BeautifulSoup(r.text, "html.parser")
+            text_full = soup.get_text(" ", strip=True)
+
+            for tel in PHONE_FR_RE.findall(text_full):
+                res["phones"].add(format_phone_fr(tel))
+
+            for a in soup.select("li.b_algo h2 a[href]"):
+                h = unwrap_tracking_url(a.get("href", ""))
+                if not h: continue
+                d = urlparse(h).netloc.lower()
+
+                if "instagram.com" in d and not res["instagram"]:
+                    m_i = INSTA_RE.search(h)
+                    if m_i and m_i.group(1).lower() not in ["p", "reel"]:
+                        res["instagram"] = f"https://www.instagram.com/{m_i.group(1)}/"
+                elif "facebook.com" in d and not res["facebook"]:
+                    m_f = FB_RE.search(h)
+                    if m_f and m_f.group(1).lower() not in ["sharer", "tr"]:
+                        res["facebook"] = f"https://www.facebook.com/{m_f.group(1)}"
+                elif "planity.com" in d and not res["planity"]:
+                    res["planity"] = h
+                elif d and not res["site_web"] and not any(bad in d for bad in ["bing", "microsoft", "pagesjaunes", "societe", "infogreffe"]):
+                    res["site_web"] = f"{urlparse(h).scheme}://{d}"
+    except Exception:
+        pass
+    return res
 
 def send_to_google_sheet(webhook_url: str, rows: list) -> bool:
     if not webhook_url or not rows: return False
@@ -352,7 +387,7 @@ def send_to_google_sheet(webhook_url: str, rows: list) -> bool:
     return False
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PIPELINE PRINCIPAL ULTRA-ROBUSTE
+# PIPELINE PRINCIPAL TOTAL
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_targeted_live_scraper():
@@ -373,11 +408,7 @@ def run_targeted_live_scraper():
     total_exploitable = 0
     buffer_live = []
 
-    logging.info("=== DEMARRAGE DU SCRAPER TOUT-TERRAIN (ANTI-BLOCAGES) ===")
-    if webhook_url:
-        logging.info("--> Webhook Google Sheets ACTIVE : envoi en continu des 2 prospects.")
-    else:
-        logging.warning("--> ATTENTION : GOOGLE_SHEET_WEBHOOK_URL non defini dans l'environnement.")
+    logging.info("=== DEMARRAGE DU SCRAPER COMPLET (GOOGLE MAPS + OSM + PLANITY + SIRENE) ===")
 
     for ville, dept in VILLES_CIBLES:
         if time.time() - start_time >= MAX_RUN_SECONDS:
@@ -386,7 +417,79 @@ def run_targeted_live_scraper():
 
         logging.info(f"\n################ VILLE : {ville.upper()} ({dept}) ################")
 
-        # 1. CIBLE LAVERIES (OVERPASS MULTI-SERVEURS)
+        # 1. SALONS DE COIFFURE VIA GOOGLE MAPS
+        for maps_salon in search_google_maps_salons(session, ville):
+            if not (maps_salon["mob"] or maps_salon["fix"]): continue
+            if not dedup.is_dup(maps_salon["nom"], ville, maps_salon["mob"], maps_salon["fix"]):
+                dedup.add(maps_salon["nom"], ville, maps_salon["mob"], maps_salon["fix"])
+                p = {
+                    "Cible": "Salons de Coiffure",
+                    "Enseigne / Nom": maps_salon["nom"],
+                    "Dirigeant": "",
+                    "Mobile 06/07": maps_salon["mob"],
+                    "Téléphone Fixe": maps_salon["fix"],
+                    "Email": "",
+                    "Instagram": "",
+                    "Facebook": "",
+                    "Site Web": maps_salon["maps_url"],
+                    "Lien Planity": "",
+                    "Ville": ville,
+                    "Code Postal": dept,
+                    "Adresse": "",
+                    "Date": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                }
+                with open(CSV_FILE, "a", newline="", encoding="utf-8-sig") as f:
+                    csv.DictWriter(f, fieldnames=fieldnames).writerow(p)
+
+                buffer_live.append(p)
+                total_exploitable += 1
+                logging.info(f"[MAPS SALON #{total_exploitable}] {p['Enseigne / Nom']} ({ville}) | Mob: {maps_salon['mob']} | Fixe: {maps_salon['fix']}")
+                if len(buffer_live) >= 2:
+                    send_to_google_sheet(webhook_url, buffer_live)
+                    buffer_live = []
+
+        # 2. SALONS DE COIFFURE VIA OSM CARTOGRAPHIE
+        for osm_salon in query_osm_salons(ville):
+            phone = osm_salon["phone"]
+            mob = phone if is_mobile(phone) else ""
+            fix = phone if not is_mobile(phone) else ""
+
+            crawl = crawl_site_deep(session, osm_salon["website"]) if osm_salon["website"] else {}
+            if crawl.get("mobiles") and not mob: mob = list(crawl["mobiles"])[0]
+            if crawl.get("fixes") and not fix: fix = list(crawl["fixes"])[0]
+            emails = crawl.get("emails", set())
+
+            if not (mob or fix or emails): continue
+
+            if not dedup.is_dup(osm_salon["nom"], ville, mob, fix):
+                dedup.add(osm_salon["nom"], ville, mob, fix)
+                p = {
+                    "Cible": "Salons de Coiffure",
+                    "Enseigne / Nom": osm_salon["nom"],
+                    "Dirigeant": "",
+                    "Mobile 06/07": mob,
+                    "Téléphone Fixe": fix,
+                    "Email": "; ".join(emails),
+                    "Instagram": crawl.get("instagram", ""),
+                    "Facebook": "",
+                    "Site Web": osm_salon["website"],
+                    "Lien Planity": "",
+                    "Ville": ville,
+                    "Code Postal": osm_salon["cp"] or dept,
+                    "Adresse": osm_salon["adresse"],
+                    "Date": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                }
+                with open(CSV_FILE, "a", newline="", encoding="utf-8-sig") as f:
+                    csv.DictWriter(f, fieldnames=fieldnames).writerow(p)
+
+                buffer_live.append(p)
+                total_exploitable += 1
+                logging.info(f"[OSM SALON #{total_exploitable}] {p['Enseigne / Nom']} ({ville}) | Mob: {mob} | Fixe: {fix} | Mail: {p['Email']}")
+                if len(buffer_live) >= 2:
+                    send_to_google_sheet(webhook_url, buffer_live)
+                    buffer_live = []
+
+        # 3. LAVERIES AUTOMATIQUES (OVERPASS + NETWORKS)
         for lav in query_osm_laveries_multi_server(ville):
             mob = lav["phone"] if is_mobile(lav["phone"]) else ""
             fix = lav["phone"] if not is_mobile(lav["phone"]) else ""
@@ -427,11 +530,11 @@ def run_targeted_live_scraper():
                     send_to_google_sheet(webhook_url, buffer_live)
                     buffer_live = []
 
-        # 2. CIBLE COIFFURE & COMPLÉMENTS VIA SIRENE + MULTI-ENGINE
+        # 4. COMPLEMENT SIRENE + BING
         for cible, naf in [("Salons de Coiffure", "96.02A"), ("Laveries Automatiques", "96.01B")]:
             if time.time() - start_time >= MAX_RUN_SECONDS: break
             try:
-                params = {"activite_principale": naf, "departement": dept, "etat_administratif": "A", "per_page": 25}
+                params = {"activite_principale": naf, "departement": dept, "etat_administratif": "A", "per_page": 20}
                 r_sir = session.get("https://recherche-entreprises.api.gouv.fr/search", params=params, timeout=TIMEOUT_API)
                 items = r_sir.json().get("results", []) if r_sir.status_code == 200 else []
             except Exception:
@@ -448,8 +551,7 @@ def run_targeted_live_scraper():
                 v = clean_str(siege.get("commune", "")) or ville
                 adresse = clean_str(siege.get("adresse", ""))
 
-                # Recherche ciblée anti-blocage
-                search_res = search_targeted_multi_engine(session, f'"{nom}" "{v}"')
+                search_res = search_targeted(session, f'"{nom}" "{v}"')
                 site = search_res.get("site_web", "")
                 crawl = crawl_site_deep(session, site) if site else {}
 
@@ -466,7 +568,6 @@ def run_targeted_live_scraper():
                 fix_str = " / ".join(fixes)
                 mail_str = "; ".join(all_emails)
 
-                # FILTRE EXPLOITABLE STRICT
                 if not (mob_str or fix_str or mail_str or insta):
                     continue
 
