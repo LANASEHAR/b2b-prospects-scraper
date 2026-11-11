@@ -1,0 +1,64 @@
+"""
+Scraper B2B de commerces locaux (Salons de coiffure, Laveries)
+Sortie : Fichier CSV prêt à être importé dans votre CRM.
+"""
+import requests
+import csv
+import json
+import time
+
+OVERPASS_URL = "http://overpass-api.de/api/interpreter"
+
+# Définition des cibles et des zones (Ex: départements ou grandes villes)
+AMENITIES = {
+    "coiffure": 'node["shop"="hairdresser"](area.searchArea);',
+    "laverie": 'node["shop"="laundry"](area.searchArea);'
+}
+
+def search_leads(city_name="Paris", amenity_type="coiffure"):
+    query = f"""
+    [out:json][timeout:60];
+    area[name="{city_name}"]["admin_level"~"(6|7|8)"]->.searchArea;
+    (
+      {AMENITIES[amenity_type]}
+    );
+    out body;
+    """
+    try:
+        response = requests.post(OVERPASS_URL, data={'data': query})
+        data = response.json()
+        leads = []
+        for element in data.get('elements', []):
+            tags = element.get('tags', {})
+            leads.append({
+                "Nom": tags.get('name', 'Inconnu'),
+                "Activité": amenity_type,
+                "Téléphone": tags.get('phone') or tags.get('contact:phone', ''),
+                "Email": tags.get('email') or tags.get('contact:email', ''),
+                "Site Web": tags.get('website') or tags.get('contact:website', ''),
+                "Adresse": f"{tags.get('addr:street', '')} {tags.get('addr:postcode', '')} {city_name}",
+                "Latitude": element.get('lat'),
+                "Longitude": element.get('lon')
+            })
+        return leads
+    except Exception as e:
+        print(f"Erreur lors de la requête pour {city_name}: {e}")
+        return []
+
+def export_to_csv(leads, filename="leads_boutique_fresh.csv"):
+    keys = ["Nom", "Activité", "Téléphone", "Email", "Site Web", "Adresse", "Latitude", "Longitude"]
+    with open(filename, 'w', newline='', encoding='utf-8') as f:
+        dict_writer = csv.DictWriter(f, fieldnames=keys)
+        dict_writer.writeheader()
+        dict_writer.writerows(leads)
+    print(f"Export réussi : {len(leads)} leads enregistrés dans {filename}")
+
+if __name__ == "__main__":
+    villes = ["Lyon", "Marseille", "Bordeaux", "Lille", "Toulouse", "Nantes"]
+    all_leads = []
+    for v in villes:
+        print(f"Recherche à {v}...")
+        all_leads.extend(search_leads(v, "coiffure"))
+        all_leads.extend(search_leads(v, "laverie"))
+        time.sleep(2)
+    export_to_csv(all_leads)
